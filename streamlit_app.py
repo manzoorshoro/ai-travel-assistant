@@ -427,3 +427,4 @@ with st.expander("Debug: detection metadata"):
 
 st.success("✅ Done. (Auto-Locate Phase-1 complete)")
 st.caption("APIs: Open-Meteo, OpenStreetMap/Overpass, Wikipedia REST/GeoSearch, Google News RSS. Be mindful of fair use and rate limits.")
+

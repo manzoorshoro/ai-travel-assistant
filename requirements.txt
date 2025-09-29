@@ -3,3 +3,5 @@ requests
 feedparser
 pandas
 streamlit-js-eval>=0.1.7
+streamlit-geolocation>=0.3.0
+

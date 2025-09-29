@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-AI Travel Assistant — Cloud-safe build (JS GPS only)
-- Browser GPS via streamlit-js-eval (no extra packages)
+AI Travel Assistant — vCloud
+- Browser GPS via streamlit-js-eval (accurate)
 - Fallbacks: FORCE_* → Browser GPS → IP providers → Karachi
-- City search override (e.g., Dubai)
+- City search override
+- Weather (Open-Meteo) • Restaurants (OSM/Overpass) • Attractions (Wikipedia) • Local News (Google News RSS)
 """
 
 import os, math, time
@@ -122,7 +123,7 @@ def _try_ip_providers():
             continue
     return None
 
-# ----------------- Browser GPS (js-eval) -----------------
+# ----------------- Browser GPS via JS -----------------
 def _browser_loc_via_js_eval():
     if "browser_loc_js" in st.session_state:
         return st.session_state["browser_loc_js"]

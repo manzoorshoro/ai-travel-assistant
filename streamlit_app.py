@@ -2,13 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-AI Travel Assistant — v0.4.3
-- Tries 2 browser-GPS methods:
-    A) streamlit-geolocation (if available)
-    B) streamlit-js-eval (fallback)
-- If A isn't installed, the app still runs (no import crash)
-- Order: FORCE_* → Browser GPS → IP → Karachi
-- City search override for immediate accuracy (e.g., "Dubai")
+AI Travel Assistant — Cloud-safe build (JS GPS only)
+- Browser GPS via streamlit-js-eval (no extra packages)
+- Fallbacks: FORCE_* → Browser GPS → IP providers → Karachi
+- City search override (e.g., Dubai)
 """
 
 import os, math, time
@@ -16,20 +13,10 @@ from urllib.parse import quote_plus
 import requests, feedparser
 import pandas as pd
 import streamlit as st
+from streamlit_js_eval import get_geolocation  # client-side GPS
 
-# --- Try to import the widget; don't crash if unavailable ---
-HAS_GEO_WIDGET = True
-try:
-    from streamlit_geolocation import geolocation as geo_widget   # Method A
-except Exception:
-    HAS_GEO_WIDGET = False
-    geo_widget = None
-
-# Always available (Method B)
-from streamlit_js_eval import get_geolocation as geo_js_eval
-
-APP_TITLE = "🌍 AI Travel Assistant — v0.4.3"
-USER_AGENT = "AI-Travel-Assistant/0.4.3 (contact: example@example.com)"
+APP_TITLE = "🌍 AI Travel Assistant — vCloud"
+USER_AGENT = "AI-Travel-Assistant/Cloud (contact: example@example.com)"
 
 st.set_page_config(page_title="AI Travel Assistant", page_icon="🌍", layout="wide")
 
@@ -49,19 +36,13 @@ with st.sidebar:
     max_rest = st.slider("Max restaurants", 5, 30, 12, 1)
     max_attract = st.slider("Max attractions", 3, 15, 8, 1)
     max_news = st.slider("Max news items", 3, 15, 6, 1)
-    st.caption("Tip: leave overrides empty to auto-detect via Browser/IP.")
 
     st.divider()
-    # Buttons to (re)trigger geolocation
-    label = "📍 Get my location" + ("" if HAS_GEO_WIDGET else " (js method)")
-    if st.button(label):
-        for k in ("browser_loc_widget", "browser_loc_js"):
-            st.session_state.pop(k, None)
+    if st.button("📍 Get my location"):
+        st.session_state.pop("browser_loc_js", None)
         st.rerun()
-
     if st.button("↻ Try GPS again"):
-        for k in ("browser_loc_widget", "browser_loc_js"):
-            st.session_state.pop(k, None)
+        st.session_state.pop("browser_loc_js", None)
         st.rerun()
 
 st.title(APP_TITLE)
@@ -73,7 +54,8 @@ def geocode_city(city: str):
     url = f"https://geocoding-api.open-meteo.com/v1/search?name={quote_plus(city)}&count=1&language=en&format=json"
     r = requests.get(url, timeout=20); r.raise_for_status()
     data = r.json()
-    if not data.get("results"): return None
+    if not data.get("results"):
+        return None
     res = data["results"][0]
     return {
         "name": res.get("name"), "country": res.get("country"),
@@ -108,24 +90,6 @@ def reverse_geocode(lat: float, lon: float):
         pass
     return {}
 
-@st.cache_data(show_spinner=False, ttl=5*60)
-def _reverse_for_tz(lat: float, lon: float):
-    rev = reverse_geocode(lat, lon) or {}
-    if not rev.get("timezone"):
-        try:
-            url = f"https://geocoding-api.open-meteo.com/v1/reverse?latitude={lat}&longitude={lon}&language=en&format=json"
-            r = requests.get(url, timeout=10); r.raise_for_status()
-            j = r.json()
-            if j.get("results"):
-                r0 = j["results"][0]
-                rev["timezone"] = r0.get("timezone")
-                rev["name"] = rev.get("name") or r0.get("name")
-                rev["admin1"] = rev.get("admin1") or r0.get("admin1")
-                rev["country"] = rev.get("country") or r0.get("country")
-        except requests.RequestException:
-            pass
-    return rev
-
 @st.cache_data(show_spinner=False, ttl=15*60)
 def _try_ip_providers():
     providers = [
@@ -158,28 +122,12 @@ def _try_ip_providers():
             continue
     return None
 
-# ----------------- Browser GPS (two methods, safe) -----------------
-def _browser_loc_via_widget():
-    if not HAS_GEO_WIDGET: return None
-    if "browser_loc_widget" in st.session_state:
-        return st.session_state["browser_loc_widget"]
-    try:
-        data = geo_widget()  # renders a "Get location" UI
-        if data and data.get("latitude") and data.get("longitude"):
-            out = {"lat": float(data["latitude"]), "lon": float(data["longitude"]),
-                   "accuracy": float(data.get("accuracy", 0.0)), "method": "widget"}
-            st.session_state["browser_loc_widget"] = out
-            return out
-    except Exception:
-        pass
-    st.session_state["browser_loc_widget"] = None
-    return None
-
+# ----------------- Browser GPS (js-eval) -----------------
 def _browser_loc_via_js_eval():
     if "browser_loc_js" in st.session_state:
         return st.session_state["browser_loc_js"]
     try:
-        loc = geo_js_eval()
+        loc = get_geolocation()
         if loc and "coords" in loc:
             c = loc["coords"]
             out = {"lat": float(c["latitude"]), "lon": float(c["longitude"]),
@@ -191,16 +139,9 @@ def _browser_loc_via_js_eval():
     st.session_state["browser_loc_js"] = None
     return None
 
-def get_browser_loc_priority():
-    w = _browser_loc_via_widget()
-    if w: return w
-    j = _browser_loc_via_js_eval()
-    if j: return j
-    return None
-
 # ----------------- Autodetect -----------------
 def autodetect_location(default_city="Karachi", force_city="", force_coords="", browser_loc=None):
-    # A) manual city search
+    # 0) manual city search
     if city_search and search_btn:
         meta = geocode_city(city_search)
         if meta:
@@ -209,11 +150,11 @@ def autodetect_location(default_city="Karachi", force_city="", force_coords="", 
         else:
             st.warning("City not found; continuing with auto-detection.")
 
-    # B) FORCE_* overrides
+    # 1) FORCE_* overrides
     if force_coords.strip():
         try:
             lat, lon = [float(x) for x in force_coords.split(",")]
-            rev = _reverse_for_tz(lat, lon)
+            rev = reverse_geocode(lat, lon)
             return {"source": "FORCE_COORDS", "name": rev.get("name") or force_city or default_city,
                     "admin1": rev.get("admin1"), "country": rev.get("country") or "Pakistan",
                     "lat": lat, "lon": lon, "timezone": rev.get("timezone") or "Asia/Karachi"}
@@ -227,16 +168,16 @@ def autodetect_location(default_city="Karachi", force_city="", force_coords="", 
             return meta
         st.warning("FORCE_CITY not found via geocoder; falling back to auto-detect.")
 
-    # C) Browser GPS
+    # 2) Browser GPS
     if browser_loc and browser_loc.get("lat") and browser_loc.get("lon"):
         lat, lon = float(browser_loc["lat"]), float(browser_loc["lon"])
-        rev = _reverse_for_tz(lat, lon) or {}
+        rev = reverse_geocode(lat, lon) or {}
         return {"source": f"browser-gps:{browser_loc.get('method','')}",
                 "name": rev.get("name") or default_city, "admin1": rev.get("admin1"),
                 "country": rev.get("country") or "Pakistan", "lat": lat, "lon": lon,
                 "timezone": rev.get("timezone") or "Asia/Karachi"}
 
-    # D) IP providers
+    # 3) IP providers
     ip = _try_ip_providers()
     if ip:
         rev = reverse_geocode(ip["lat"], ip["lon"])
@@ -246,7 +187,7 @@ def autodetect_location(default_city="Karachi", force_city="", force_coords="", 
                 "lat": ip["lat"], "lon": ip["lon"],
                 "timezone": rev.get("timezone") or ip.get("tz") or "Asia/Karachi"}
 
-    # E) Fallback
+    # 4) Fallback
     meta = geocode_city(default_city)
     if meta:
         meta["source"] = "fallback"
@@ -328,7 +269,7 @@ def get_restaurants(lat: float, lon: float, km_box=5, limit=12):
         if "lat" in el and "lon" in el:
             rlat, rlon = el["lat"], el["lon"]
         else:
-            c = el.get("center"); 
+            c = el.get("center")
             if not c: continue
             rlat, rlon = c["lat"], c["lon"]
         rows.append({
@@ -347,18 +288,16 @@ def get_restaurants(lat: float, lon: float, km_box=5, limit=12):
 
 # ----------------- News -----------------
 @st.cache_data(show_spinner=False, ttl=15*60)
-def get_local_news(city: str, max_items=6, lang="en"):
+def get_local_news(city: str, max_items=6):
     query = f"{city} when:7d"
     rss = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en&gl=US&ceid=US:en"
     feed = feedparser.parse(rss)
-    out = []
-    for e in feed.entries[:max_items]:
-        out.append({"title": e.title, "link": e.link, "published": getattr(e, "published", None)})
-    return out
+    return [{"title": e.title, "link": e.link, "published": getattr(e, "published", None)}
+            for e in feed.entries[:max_items]]
 
 # ----------------- MAIN -----------------
 with st.spinner("Detecting your location…"):
-    browser_loc = get_browser_loc_priority()
+    browser_loc = _browser_loc_via_js_eval()
     meta = autodetect_location(
         default_city="Karachi",
         force_city=force_city_ui or os.getenv("FORCE_CITY", ""),
@@ -407,12 +346,9 @@ wcol[0].metric("Temp (°C)", cur.get("temperature_2m"))
 wcol[1].metric("Feels (°C)", cur.get("apparent_temperature"))
 wcol[2].metric("Humidity (%)", cur.get("relative_humidity_2m"))
 wcol[3].metric("Wind (km/h)", cur.get("wind_speed_10m"))
-try:
-    today_hi = (daily.get("temperature_2m_max") or [None])[0]
-    today_lo = (daily.get("temperature_2m_min") or [None])[0]
-    today_pr = (daily.get("precipitation_sum") or [None])[0]
-except Exception:
-    today_hi = today_lo = today_pr = None
+today_hi = (daily.get("temperature_2m_max") or [None])[0]
+today_lo = (daily.get("temperature_2m_min") or [None])[0]
+today_pr = (daily.get("precipitation_sum") or [None])[0]
 wcol[4].metric("Today Hi/Lo", f"{today_hi} / {today_lo}")
 st.caption(f"Precipitation (today): **{today_pr} mm**")
 
@@ -428,7 +364,7 @@ else:
             st.markdown(f"**{i}. {a['title']}**  ·  ~{a['distance_km']:.2f} km")
             if a.get("summary"): st.write(a["summary"])
             if a.get("url"): st.markdown(f"[Open in Wikipedia]({a['url']})")
-with st.expander("Attractions (table)"): st.dataframe(pd.DataFrame(attractions))
+with st.expander("Attractions (table)"): st.dataframe(pd.DataFrame(attractions), width="stretch")
 
 # Restaurants
 st.subheader("🍽️ Nearby Restaurants (OpenStreetMap)")
@@ -436,7 +372,7 @@ if not restaurants:
     st.info("No restaurants found in the current ~box. Try increasing the km range.")
 else:
     r_df = pd.DataFrame(restaurants)
-    st.dataframe(r_df[["name", "cuisine", "distance_km", "address", "phone", "website"]], use_container_width=True)
+    st.dataframe(r_df[["name", "cuisine", "distance_km", "address", "phone", "website"]], width="stretch")
     with st.expander("Plot restaurants on map"):
         if {"lat", "lon"}.issubset(r_df.columns):
             st.map(r_df.rename(columns={"lat": "lat", "lon": "lon"}))
@@ -455,5 +391,5 @@ else:
             st.markdown(f"[Read article]({n['link']})")
 
 with st.expander("Debug: detection metadata"): st.json(meta)
-st.success("✅ Done. (Robust Browser GPS with safe fallbacks)")
+st.success("✅ Done.")
 st.caption("APIs: Open-Meteo, OpenStreetMap/Overpass, Wikipedia REST/GeoSearch, Google News RSS.")

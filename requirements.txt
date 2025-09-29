@@ -2,4 +2,4 @@ streamlit>=1.36
 requests
 feedparser
 pandas
-streamlit-js-eval==0.1.7
+streamlit-js-eval>=0.1.7

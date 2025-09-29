@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-AI Travel Assistant — v0.3.2 (Streamlit edition)
+AI Travel Assistant — v0.4.0 (Streamlit edition)
+- Browser geolocation first (streamlit-js-eval), then IP providers, then Karachi fallback
 - Multi-provider IP geolocation (ipapi → ipinfo → ipwho)
 - Reverse geocoding via OSM Nominatim (English labels) with Open-Meteo as backup
 - Weather (Open-Meteo) • Restaurants (OSM/Overpass) • Attractions (Wikipedia) • Local News (Google News RSS, 7d)
-- Strict fallback city = Karachi
 - Streamlit UI with caching, status messages, and debug expanders
 
 Env overrides (optional):
@@ -15,18 +15,21 @@ Env overrides (optional):
 """
 
 import os, math, time, textwrap
-from datetime import datetime
 from urllib.parse import quote_plus
 import requests, feedparser
 import pandas as pd
 import streamlit as st
 
-APP_TITLE = "🌍 AI Travel Assistant — v0.3.2"
-USER_AGENT = "AI-Travel-Assistant/0.3.2 (contact: example@example.com)"
+# NEW: fetch real user location from the browser (client-side)
+from streamlit_js_eval import get_geolocation
+
+APP_TITLE = "🌍 AI Travel Assistant — v0.4.0"
+USER_AGENT = "AI-Travel-Assistant/0.4.0 (contact: example@example.com)"
 
 # ----------------- UTIL -----------------
 def wrap(txt, width=90):
-    return textwrap.fill(txt or "", width=width)
+    import textwrap as tw
+    return tw.fill(txt or "", width=width)
 
 st.set_page_config(page_title="AI Travel Assistant", page_icon="🌍", layout="wide")
 
@@ -40,7 +43,17 @@ with st.sidebar:
     max_rest = st.slider("Max restaurants", 5, 30, 12, 1)
     max_attract = st.slider("Max attractions", 3, 15, 8, 1)
     max_news = st.slider("Max news items", 3, 15, 6, 1)
-    st.caption("Tip: leave overrides empty to auto-detect via IP.")
+    st.caption("Tip: leave overrides empty to auto-detect via Browser/IP. 📍")
+
+    st.divider()
+    prefer_browser = st.toggle(
+        "Prefer browser GPS (best accuracy)",
+        value=True,
+        help="Uses your device's location via the browser (requires HTTPS permission)."
+    )
+    if st.button("↻ Redetect browser location"):
+        st.session_state.pop("browser_loc", None)  # force a fresh read
+        st.rerun()
 
 st.title(APP_TITLE)
 st.write("Auto-locate → show **weather**, **nearby restaurants**, **attractions**, and **local news**. Karachi is the strict fallback.")
@@ -112,6 +125,25 @@ def reverse_geocode(lat: float, lon: float):
 
     return {}
 
+@st.cache_data(show_spinner=False, ttl=5*60)
+def _reverse_for_tz(lat: float, lon: float):
+    """Small helper to enrich coords with labels & timezone."""
+    rev = reverse_geocode(lat, lon) or {}
+    if not rev.get("timezone"):
+        try:
+            url = f"https://geocoding-api.open-meteo.com/v1/reverse?latitude={lat}&longitude={lon}&language=en&format=json"
+            r = requests.get(url, timeout=10); r.raise_for_status()
+            j = r.json()
+            if j.get("results"):
+                r0 = j["results"][0]
+                rev["timezone"] = r0.get("timezone")
+                rev["name"] = rev.get("name") or r0.get("name")
+                rev["admin1"] = rev.get("admin1") or r0.get("admin1")
+                rev["country"] = rev.get("country") or r0.get("country")
+        except requests.RequestException:
+            pass
+    return rev
+
 @st.cache_data(show_spinner=False, ttl=15*60)
 def _try_ip_providers():
     providers = [
@@ -150,12 +182,39 @@ def _try_ip_providers():
             continue
     return None
 
-def autodetect_location(default_city="Karachi", force_city="", force_coords=""):
+def get_browser_loc_once(prefer_browser: bool):
+    """
+    Tries to read user's location from the browser (client-side).
+    Cached in session_state to avoid repeated prompts. Returns dict or None.
+    """
+    if not prefer_browser:
+        return None
+
+    if "browser_loc" in st.session_state:
+        return st.session_state["browser_loc"]
+
+    loc = get_geolocation()  # triggers permission prompt on first render
+    if loc and "coords" in loc:
+        try:
+            coords = loc["coords"]
+            st.session_state["browser_loc"] = {
+                "lat": float(coords["latitude"]),
+                "lon": float(coords["longitude"]),
+                "accuracy": float(coords.get("accuracy", 0.0)),
+            }
+        except Exception:
+            st.session_state["browser_loc"] = None
+    else:
+        st.session_state["browser_loc"] = None
+
+    return st.session_state["browser_loc"]
+
+def autodetect_location(default_city="Karachi", force_city="", force_coords="", browser_loc=None):
     # 1) Overrides
     if force_coords.strip():
         try:
             lat, lon = [float(x) for x in force_coords.split(",")]
-            rev = reverse_geocode(lat, lon)
+            rev = _reverse_for_tz(lat, lon)
             return {
                 "source": "FORCE_COORDS",
                 "name": rev.get("name") or force_city or default_city,
@@ -174,7 +233,20 @@ def autodetect_location(default_city="Karachi", force_city="", force_coords=""):
             return meta
         st.warning("FORCE_CITY not found via geocoder; falling back to auto-detect.")
 
-    # 2) IP providers
+    # 1b) Browser GPS (most accurate)
+    if browser_loc and isinstance(browser_loc, dict) and browser_loc.get("lat") and browser_loc.get("lon"):
+        lat, lon = float(browser_loc["lat"]), float(browser_loc["lon"])
+        rev = _reverse_for_tz(lat, lon) or {}
+        return {
+            "source": "browser-gps",
+            "name": rev.get("name") or force_city or default_city,
+            "admin1": rev.get("admin1"),
+            "country": rev.get("country") or "Pakistan",
+            "lat": lat, "lon": lon,
+            "timezone": rev.get("timezone") or "Asia/Karachi",
+        }
+
+    # 2) IP providers (server-side, may be wrong if hosted remotely)
     ip = _try_ip_providers()
     if ip:
         rev = reverse_geocode(ip["lat"], ip["lon"])
@@ -234,7 +306,7 @@ def get_attractions(lat: float, lon: float, radius_m=10000, limit=8):
     out = []
     for it in items:
         title = it.get("title")
-        if not title: 
+        if not title:
             continue
         s_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote_plus(title)}"
         try:
@@ -313,15 +385,21 @@ def get_local_news(city: str, max_items=6, lang="en-PK"):
 
 # ----------------- MAIN FLOW (UI) -----------------
 with st.spinner("Detecting your location…"):
+    browser_loc = get_browser_loc_once(prefer_browser)
     meta = autodetect_location(
         default_city="Karachi",
         force_city=force_city_ui or os.getenv("FORCE_CITY", ""),
-        force_coords=force_coords_ui or os.getenv("FORCE_COORDS", "")
+        force_coords=force_coords_ui or os.getenv("FORCE_COORDS", ""),
+        browser_loc=browser_loc
     )
 
 if not meta:
     st.error("Could not determine your location. Please set FORCE_CITY or FORCE_COORDS in the sidebar.")
     st.stop()
+
+# Help the user if permission was denied
+if prefer_browser and browser_loc is None:
+    st.info("If your location looks off, click **↻ Redetect browser location** in the sidebar and allow the browser’s location permission.")
 
 # Header card
 col1, col2, col3, col4 = st.columns(4)
@@ -400,7 +478,6 @@ if not restaurants:
     st.info("No restaurants found in the current ~box. Try increasing the km range in the sidebar.")
 else:
     r_df = pd.DataFrame(restaurants)
-    # Nice preview table
     st.dataframe(
         r_df[["name", "cuisine", "distance_km", "address", "phone", "website"]],
         use_container_width=True
@@ -425,6 +502,5 @@ else:
 with st.expander("Debug: detection metadata"):
     st.json(meta)
 
-st.success("✅ Done. (Auto-Locate Phase-1 complete)")
+st.success("✅ Done. (Auto-Locate with Browser GPS complete)")
 st.caption("APIs: Open-Meteo, OpenStreetMap/Overpass, Wikipedia REST/GeoSearch, Google News RSS. Be mindful of fair use and rate limits.")
-
